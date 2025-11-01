@@ -38,6 +38,11 @@
 #include <wlr/types/wlr_xdg_output_v1.h>
 #include <wlr/types/wlr_xdg_shell.h>
 #include <wlr/util/log.h>
+#include <xcb/xcb.h>
+#include <xcb/composite.h>
+#include <xcb/render.h>
+#include <xcb/res.h>
+#include <xcb/xfixes.h>
 #include <xkbcommon/xkbcommon.h>
 
 /* For brevity's sake, struct members are annotated where they are used. */
@@ -81,6 +86,12 @@ struct tinywl_server
 	struct wl_listener new_output;
 
 	int width, height;
+
+	int x11_conn_fd;
+	xcb_connection_t *x11_conn;
+	xcb_screen_t *x11_screen;
+	struct wl_event_source *x11_event_source;
+	struct wl_event_source *x11_snoop_idle_source;
 };
 
 struct tinywl_output
@@ -783,21 +794,145 @@ static void wayback_wlr_vlog(enum wayback_log_level verbosity, const char *fmt, 
 	_wlr_vlog(importance, fmt, args);
 }
 
+#define XCB_EVENT_RESPONSE_TYPE_MASK (0x7f)
+
+static int x11_snoop_handle_event(int fd, uint32_t mask, void *data);
+static int x11_snoop_create(struct tinywl_server *server, int x11_socket)
+{
+	struct wl_event_loop *loop = wl_display_get_event_loop(server->wl_display);
+	server->x11_event_source = wl_event_loop_add_fd(loop, server->x11_conn_fd, WL_EVENT_READABLE,
+		x11_snoop_handle_event, server);
+	wl_event_source_check(server->x11_event_source);
+
+	server->x11_conn = xcb_connect_to_fd(server->x11_conn_fd, NULL);
+
+	int rc = xcb_connection_has_error(server->x11_conn);
+	if (rc) {
+		wayback_log(LOG_ERROR, "Unable to connect X11 snoop client: %d", rc);
+		exit(EXIT_FAILURE);
+	}
+
+	xcb_screen_iterator_t screen_iterator =
+		xcb_setup_roots_iterator(xcb_get_setup(server->x11_conn));
+	server->x11_screen = screen_iterator.data;
+
+	uint32_t values[] = {
+		XCB_EVENT_MASK_SUBSTRUCTURE_NOTIFY |
+			XCB_EVENT_MASK_SUBSTRUCTURE_REDIRECT |
+			XCB_EVENT_MASK_PROPERTY_CHANGE,
+	};
+	xcb_change_window_attributes(server->x11_conn,
+		server->x11_screen->root,
+		XCB_CW_EVENT_MASK,
+		values);
+
+	xcb_composite_redirect_subwindows(server->x11_conn,
+		server->x11_screen->root,
+		XCB_COMPOSITE_REDIRECT_MANUAL);
+
+	xcb_flush(server->x11_conn);
+
+	return 0;
+}
+
+static void x11_snoop_destroy(struct tinywl_server *server)
+{
+	wl_event_source_remove(server->x11_event_source);
+	close(server->x11_conn_fd);
+}
+
+static void x11_handle_xcb_error(struct tinywl_server *server, xcb_value_error_t *ev)
+{
+	wayback_log(LOG_ERROR, "xcb error: op %"PRIu8":%"PRIu16", code %"PRIu8", sequence %"PRIu16", value %"PRIu32,
+		ev->major_opcode, ev->minor_opcode, ev->error_code,
+		ev->sequence, ev->bad_value);
+}
+
+static void x11_handle_unhandled_event(struct tinywl_server *server, xcb_generic_event_t *ev)
+{
+	wayback_log(LOG_INFO, "unhandled X11 event: %u", ev->response_type);
+}
+
+static int x11_read_events(struct tinywl_server *server)
+{
+	int count = 0;
+
+	xcb_generic_event_t *event;
+	while ((event = xcb_poll_for_event(server->x11_conn))) {
+		count++;
+
+		switch (event->response_type & XCB_EVENT_RESPONSE_TYPE_MASK) {
+		case 0:
+			x11_handle_xcb_error(server, (xcb_value_error_t *) event);
+			break;
+		default:
+			x11_handle_unhandled_event(server, event);
+			break;
+		}
+	}
+
+	return count;
+}
+
+static void x11_schedule_flush(struct tinywl_server *server)
+{
+	wl_event_source_fd_update(server->x11_event_source, WL_EVENT_READABLE | WL_EVENT_WRITABLE);
+}
+
+static int x11_snoop_handle_event(int fd, uint32_t mask, void *data)
+{
+	struct tinywl_server *server = data;
+
+	if ((mask & WL_EVENT_HANGUP) || (mask & WL_EVENT_ERROR)) {
+		x11_snoop_destroy(server);
+		return 0;
+	}
+
+        int count = 0;
+        if (mask & WL_EVENT_READABLE) {
+                count = x11_read_events(server);
+                if (count) {
+                        x11_schedule_flush(server);
+                }
+        }
+
+	if (mask & WL_EVENT_WRITABLE) {
+		// xcb_flush() always blocks until it's written all pending requests,
+		// but it's the only thing we have
+		xcb_flush(server->x11_conn);
+		wl_event_source_fd_update(server->x11_event_source, WL_EVENT_READABLE);
+        }
+
+        return count;
+}
+
+static int x11_snoop_setup(void *data)
+{
+	struct tinywl_server *server = data;
+
+	wl_event_source_remove(server->x11_snoop_idle_source);
+	x11_snoop_create(server, server->x11_conn_fd);
+
+	return 0;
+}
+
+
 int main(int argc, char *argv[])
 {
 	wlr_log_init(WLR_DEBUG, NULL);
 	wayback_log_init("wayback-compositor", LOG_INFO, wayback_wlr_vlog);
 
-	if (argc < 3) {
+	if (argc < 4) {
 		wayback_log(LOG_INFO,
 		            "Wayback <https://wayback.freedesktop.org/> X.Org compatibility layer");
 		wayback_log(LOG_INFO, "Version %s", WAYBACK_VERSION);
-		wayback_log(LOG_INFO, "Usage: %s <socket xwayback> <socket xwayland>", argv[0]);
+		wayback_log(LOG_INFO, "Usage: %s <socket xwayback> <socket xwayland> <socket xwayback-x11>", argv[0]);
 		exit(EXIT_FAILURE);
 	}
 
 	int xwayback_session_socket = atoi(argv[1]);
 	int xwayland_session_socket = atoi(argv[2]);
+	int xwayback_x11_socket = atoi(argv[3]);
 
 	struct tinywl_server server = { 0 };
 	/* The Wayland display is managed by libwayland. It handles accepting
@@ -987,6 +1122,10 @@ int main(int argc, char *argv[])
 		exit(EXIT_FAILURE);
 	}
 
+	server.x11_conn_fd = xwayback_x11_socket;
+	server.x11_snoop_idle_source = wl_event_loop_add_timer(wl_display_get_event_loop(server.wl_display), x11_snoop_setup, &server);
+	wl_event_source_timer_update(server.x11_snoop_idle_source, 1000);
+
 	/* Run the Wayland event loop. This does not return until you exit the
 	 * compositor. Starting the backend rigged up all of the necessary event
 	 * loop configuration to listen to libinput events, DRM events, generate
@@ -996,6 +1135,8 @@ int main(int argc, char *argv[])
 	/* Once wl_display_run returns, we destroy all clients then shut down the
 	 * server. */
 	wl_display_destroy_clients(server.wl_display);
+
+	x11_snoop_destroy(&server);
 
 	wl_list_remove(&server.cursor_motion.link);
 	wl_list_remove(&server.cursor_motion_absolute.link);
