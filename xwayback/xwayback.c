@@ -289,6 +289,7 @@ int main(int argc, char *argv[])
 	};
 	int socket_xwayback[2];
 	int socket_xwayland[2];
+	int socket_xwayback_x11[2];
 
 	signal(SIGSEGV, handle_segv);
 
@@ -357,21 +358,29 @@ int main(int argc, char *argv[])
 		exit(EXIT_FAILURE);
 	}
 
+	if (socketpair(AF_UNIX, SOCK_STREAM, 0, socket_xwayback_x11) == -1) {
+		wayback_log(LOG_ERROR, "Unable to create Xwayback-x11 socket");
+		exit(EXIT_FAILURE);
+	}
+
 	posix_spawn_file_actions_t file_actions;
 	posix_spawn_file_actions_init(&file_actions);
 	posix_spawn_file_actions_addclose(&file_actions, socket_xwayback[1]);
 	posix_spawn_file_actions_addclose(&file_actions, socket_xwayland[1]);
+	posix_spawn_file_actions_addclose(&file_actions, socket_xwayback_x11[1]);
 
 	char fd_xwayback[64];
 	char fd_xwayland[64];
+	char fd_xwayback_x11[64];
 	snprintf(fd_xwayback, sizeof(fd_xwayback), "%d", socket_xwayback[0]);
 	snprintf(fd_xwayland, sizeof(fd_xwayland), "%d", socket_xwayland[0]);
+	snprintf(fd_xwayback_x11, sizeof(fd_xwayback_x11), "%d", socket_xwayback_x11[0]);
 
 	if (posix_spawn(&comp_pid,
 	                wayback_compositor_path,
 	                &file_actions,
 	                NULL,
-	                (char *[]){ (char *)wayback_compositor_path, fd_xwayback, fd_xwayland, NULL },
+	                (char *[]){ (char *)wayback_compositor_path, fd_xwayback, fd_xwayland, fd_xwayback_x11, NULL },
 	                environ) != 0) {
 		wayback_log(LOG_ERROR, "Failed to launch wayback-compositor: %s", strerror(errno));
 		exit(EXIT_FAILURE);
@@ -381,6 +390,7 @@ int main(int argc, char *argv[])
 
 	close(socket_xwayback[0]);
 	close(socket_xwayland[0]);
+	close(socket_xwayback_x11[0]);
 
 	unsetenv("WAYLAND_DISPLAY");
 	unsetenv("WAYLAND_SOCKET");
@@ -419,12 +429,15 @@ int main(int argc, char *argv[])
 	snprintf(way_display, sizeof(way_display), "%d", socket_xwayland[1]);
 	setenv("WAYLAND_SOCKET", way_display, true);
 
+	snprintf(fd_xwayback_x11, sizeof(fd_xwayback_x11), "%d", socket_xwayback_x11[1]);
+
 	char geometry[4096] = "";
 	const char *xwayback_args[] = {
+		"-rootless",
 		"-terminate",
 		"3",
-		"-geometry",
-		geometry,
+		"-wm",
+		fd_xwayback_x11,
 	};
 
 	snprintf(geometry,
