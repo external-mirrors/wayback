@@ -20,6 +20,7 @@ wayland_client = dependency('wayland-client')
 wayland_cursor = dependency('wayland-cursor')
 wayland_egl    = dependency('wayland-egl')
 wayland_protos = dependency('wayland-protocols', version: '>=1.14')
+xcb            = [dependency('xcb'), dependency('xcb-composite')]
 xkbcommon      = dependency('xkbcommon')
 xwayland       = dependency('xwayland', version: '>=24.1')
 wlroots        = dependency('wlroots-0.19', version: '>=0.19', required: false)
