@@ -68,6 +68,11 @@ void wayback_log_init(char *ctx,
 		logging_use_color = false;
 }
 
+void wayback_log_verbosity(enum wayback_log_level max_verbosity)
+{
+	logging_max_verbosity = max_verbosity;
+}
+
 void wayback_vlog(enum wayback_log_level verbosity, const char *format, va_list args)
 {
 	logging_func(verbosity, format, args);
