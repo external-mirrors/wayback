@@ -389,12 +389,13 @@ int main(int argc, char *argv[])
 	snprintf(fd_xwayback, sizeof(fd_xwayback), "%d", socket_xwayback[0]);
 	snprintf(fd_xwayland, sizeof(fd_xwayland), "%d", socket_xwayland[0]);
 
-	if (posix_spawn(&comp_pid,
-	                wayback_compositor_path,
-	                &file_actions,
-	                NULL,
-	                (char *[]){ (char *)wayback_compositor_path, fd_xwayback, fd_xwayland, verbstr, NULL },
-	                environ) != 0) {
+	if (posix_spawn(
+			&comp_pid,
+			wayback_compositor_path,
+			&file_actions,
+			NULL,
+			(char *[]){ (char *)wayback_compositor_path, fd_xwayback, fd_xwayland, verbstr, NULL },
+			environ) != 0) {
 		wayback_log(LOG_ERROR, "Failed to launch wayback-compositor: %s", strerror(errno));
 		exit(EXIT_FAILURE);
 	}
@@ -443,12 +444,7 @@ int main(int argc, char *argv[])
 
 	char geometry[4096] = "";
 	const char *xwayback_args[] = {
-		"-terminate",
-		"3",
-		"-geometry",
-		geometry,
-		"-verbose",
-		verbstr,
+		"-terminate", "3", "-geometry", geometry, "-verbose", verbstr,
 	};
 
 	snprintf(geometry,
